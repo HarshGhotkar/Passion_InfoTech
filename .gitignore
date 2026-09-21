@@ -1,0 +1,26 @@
+__pycache__/
+*.pyc
+
+# Virtual environments
+venv/
+env/
+.env
+
+# Large Datasets
+6_dB_valve/
+6_dB_pump/
+6_dB_fan/
+6_dB_slider/
+valve/
+pump/
+fan/
+slider/
+*.zip
+*.wav
+
+# AI Models
+*.h5
+*.keras
+
+# Uploads from web interface
+uploads/
