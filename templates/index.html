@@ -223,20 +223,24 @@ structural cracks, and component degradation before catastrophic failure.
 
 <div class="dashboard">
 <div class="metric">
-<h2 id="metric-accuracy">98.5%</h2>
-Inspection Accuracy
+<h2 id="metric-machines">0</h2>
+Total Valves Tested
 </div>
 <div class="metric">
-<h2 id="metric-machines">24</h2>
-Machines Monitored
+<h2 id="metric-healthy" style="color: green;">0</h2>
+Healthy Valves
 </div>
 <div class="metric">
-<h2 id="metric-failure">72 hrs</h2>
-Failure Prediction
+<h2 id="metric-faulty" style="color: red;">0</h2>
+Faulty Valves
 </div>
 <div class="metric">
-<h2 id="metric-karma">94</h2>
-Manufacturing Karma Score
+<h2 id="metric-karma">100</h2>
+Factory Karma Score
+</div>
+<div class="metric">
+<h2 id="metric-rul" style="color: orange;">N/A</h2>
+Lowest RUL Detected
 </div>
 </div>
 
@@ -300,102 +304,30 @@ Smart Factory Digital Twin
 Acoustic Intelligence Engine
 </h2>
 
-
+<div style="display: flex; justify-content: space-around; margin-bottom: 20px; background: #f8f9fa; padding: 15px; border-radius: 8px; border: 1px solid #ddd;">
+    <div style="text-align: center;"><strong>Normal / Healthy</strong><br><span id="count-normal" style="font-size: 24px; color: green;">0</span></div>
+    <div style="text-align: center;"><strong>Micro Crack Signature</strong><br><span id="count-crack" style="font-size: 24px; color: red;">0</span></div>
+    <div style="text-align: center;"><strong>Material Fatigue</strong><br><span id="count-fatigue" style="font-size: 24px; color: orange;">0</span></div>
+    <div style="text-align: center;"><strong>Pressure/Seal Leak</strong><br><span id="count-leak" style="font-size: 24px; color: red;">0</span></div>
+</div>
 
 <table>
 
 
 <tr>
-
-<th>
-Signal Source
-</th>
-
-<th>
-AI Analysis
-</th>
-
-<th>
-Result
-</th>
-
-<th>
-Status
-</th>
-
-
+<th>Part Tag</th>
+<th>Signal Source</th>
+<th>AI Analysis</th>
+<th>Result</th>
+<th>Est. RUL</th>
+<th>Status</th>
 </tr>
 
 
 
-<tr>
-
-<td>
-Bearing Vibration Audio
-</td>
-
-<td>
-Frequency Pattern Analysis
-</td>
-
-<td>
-Micro Crack Signature
-</td>
-
-<td>
-Critical
-</td>
-
-
-</tr>
-
-
-
-<tr>
-
-<td>
-Metal Impact Sound
-</td>
-
-<td>
-Spectrogram Classification
-</td>
-
-<td>
-Material Defect
-</td>
-
-<td>
-Warning
-</td>
-
-
-</tr>
-
-
-
-<tr>
-
-<td>
-Machine Operation Noise
-</td>
-
-<td>
-Normal Pattern Detection
-</td>
-
-<td>
-Healthy
-</td>
-
-<td>
-Safe
-</td>
-
-
-</tr>
-
-
+<tbody id="diagnosticTableBody">
+<!-- Diagnostic logs will be injected here via WebSockets -->
+</tbody>
 </table>
 
 
@@ -1101,8 +1033,12 @@ async function runInspection() {
         
         resultBox.style.display = 'block';
         if (data.status === 'success') {
-            resultText.innerText = data.prediction + " (Confidence: " + 
+            resultText.innerHTML = data.prediction + " (Confidence: " + 
                 (data.prediction.includes('Healthy') ? (data.probability_healthy*100).toFixed(1) : (data.probability_defective*100).toFixed(1)) + "%)";
+            
+            if (data.spectrogram_url) {
+                resultText.innerHTML += `<br><img src="${data.spectrogram_url}" alt="Spectrogram" style="max-width:100%; margin-top:15px; border-radius: 8px;">`;
+            }
             
             if (data.prediction.includes('Healthy')) {
                 resultBox.style.backgroundColor = '#dff6dd';
@@ -1143,9 +1079,22 @@ socket.on('connect', function() {
 
 socket.on('factory_update', function(data) {
     // 1. Update Top Dashboard Metrics
-    document.getElementById('metric-karma').innerText = data.karma_score;
-    // We increment machines monitored dynamically just for visual effect
-    document.getElementById('metric-machines').innerText = data.machines.length * 24; 
+    document.getElementById('metric-karma').innerText = data.karma_score + "%";
+    document.getElementById('metric-machines').innerText = data.total_tested || 0; 
+    document.getElementById('metric-healthy').innerText = data.healthy_count || 0;
+    document.getElementById('metric-faulty').innerText = data.faulty_count || 0;
+    
+    if (data.diagnostic_log && data.diagnostic_log.status === "Critical") {
+        const rulMetric = document.getElementById('metric-rul');
+        rulMetric.innerText = data.diagnostic_log.rul;
+        rulMetric.style.color = 'red';
+    } else if (data.diagnostic_log && data.diagnostic_log.status === "Warning") {
+        const rulMetric = document.getElementById('metric-rul');
+        if (rulMetric.innerText === 'N/A' || rulMetric.innerText.includes('>')) {
+            rulMetric.innerText = data.diagnostic_log.rul;
+            rulMetric.style.color = 'orange';
+        }
+    }
 
     // 2. Update AI Health Prediction Table
     const tableBody = document.getElementById('healthTableBody');
@@ -1183,6 +1132,34 @@ socket.on('factory_update', function(data) {
             }
         }
     });
+    
+    // 4. Update Diagnostic Log Table
+    if (data.diagnostic_log) {
+        const diagBody = document.getElementById('diagnosticTableBody');
+        const trDiag = document.createElement('tr');
+        trDiag.innerHTML = `
+            <td style="font-family: monospace; font-weight: bold; color: #555;">${data.diagnostic_log.part_tag}</td>
+            <td>${data.diagnostic_log.signal_source}</td>
+            <td>${data.diagnostic_log.analysis_type}</td>
+            <td style="font-weight:bold;">${data.diagnostic_log.result}</td>
+            <td style="font-weight:bold; color: ${data.diagnostic_log.rul.includes('>') ? 'green' : 'red'};">${data.diagnostic_log.rul}</td>
+            <td style="color: ${data.diagnostic_log.status === 'Safe' ? 'green' : (data.diagnostic_log.status === 'Warning' ? 'orange' : 'red')}; font-weight:bold;">${data.diagnostic_log.status}</td>
+        `;
+        diagBody.insertBefore(trDiag, diagBody.firstChild);
+        
+        // Keep only the last 5 logs
+        if (diagBody.children.length > 5) {
+            diagBody.removeChild(diagBody.lastChild);
+        }
+    }
+    
+    // 5. Update Diagnostic Summary Counts
+    if (data.diagnostic_counts) {
+        document.getElementById('count-normal').innerText = data.diagnostic_counts["Normal Pattern Detection"] || 0;
+        document.getElementById('count-crack').innerText = data.diagnostic_counts["Micro Crack Signature"] || 0;
+        document.getElementById('count-fatigue').innerText = data.diagnostic_counts["Material Fatigue"] || 0;
+        document.getElementById('count-leak').innerText = data.diagnostic_counts["Pressure/Seal Leak"] || 0;
+    }
 });
 </script>
 

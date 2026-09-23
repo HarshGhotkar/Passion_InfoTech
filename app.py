@@ -2,14 +2,19 @@ import os
 import random
 import time
 import threading
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, url_for
 from flask_socketio import SocketIO
 import tensorflow as tf
 import librosa
+import librosa.display
 import numpy as np
 import scipy.signal
-
 import glob
+import uuid
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import pickle
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'uploads'
@@ -42,58 +47,136 @@ try:
 except Exception as e:
     print(f"Error searching for models: {e}")
 
+# Load Diagnostic KMeans Model
+kmeans_model = None
+try:
+    if os.path.exists('kmeans_diagnostic.pkl'):
+        with open('kmeans_diagnostic.pkl', 'rb') as f:
+            kmeans_model = pickle.load(f)
+        print("Diagnostic KMeans model loaded.")
+    else:
+        print("Diagnostic KMeans model not found.")
+except Exception as e:
+    print(f"Error loading KMeans model: {e}")
+
 import threading
 
 background_thread = None
 thread_lock = threading.Lock()
 
+total_tested = 0
+healthy_count = 0
+faulty_count = 0
+diagnostic_counts = {
+    "Normal Pattern Detection": 0,
+    "Micro Crack Signature": 0,
+    "Material Fatigue": 0,
+    "Pressure/Seal Leak": 0,
+    "Material Defect": 0
+}
+
 # --- Background Factory Simulator ---
 def factory_simulation_thread():
     """Simulates real-time acoustic IoT sensor data and AI predictions streaming in."""
+    global total_tested, healthy_count, faulty_count, diagnostic_counts
+    
+    # Get all available wav files in the dataset (6_dB_valve)
+    dataset_files = glob.glob('6_dB_valve/**/*.wav', recursive=True)
+    if not dataset_files:
+        print("Warning: No .wav files found in 6_dB_valve directory for simulation.")
+        
     while True:
-        # We simulate the AI analyzing acoustic data from 5 different machines
-        payload = {
-            "karma_score": random.randint(90, 99),
-            "machines": [
-                {
-                    "name": "CNC Machine",
-                    "health": random.randint(85, 99),
-                    "fail_prob": random.randint(1, 15),
-                    "rec": "Healthy",
-                    "status": "Safe"
-                },
-                {
-                    "name": "Robotic Arm",
-                    "health": random.randint(88, 99),
-                    "fail_prob": random.randint(1, 12),
-                    "rec": "Healthy",
-                    "status": "Safe"
-                },
-                {
-                    "name": "Gear Assembly",
-                    "health": random.randint(55, 75),
-                    "fail_prob": random.randint(25, 45),
-                    "rec": "Schedule Maintenance",
-                    "status": "Warning"
-                },
-                {
-                    "name": "Metal Furnace",
-                    "health": random.randint(90, 99),
-                    "fail_prob": random.randint(1, 10),
-                    "rec": "Healthy",
-                    "status": "Safe"
-                },
-                {
-                    "name": "Bearing",
-                    "health": random.randint(15, 35),
-                    "fail_prob": random.randint(65, 85),
-                    "rec": "Immediate Shutdown",
-                    "status": "Critical"
+        if dataset_files and ('valve' in models_dict or 'default' in models_dict):
+            random_file = random.choice(dataset_files)
+            try:
+                X, img_url, mean_mfcc = process_audio(random_file)
+                model_key = 'valve' if 'valve' in models_dict else 'default'
+                selected_model = models_dict[model_key]
+                prediction_prob = selected_model.predict(X)[0][0]
+                is_defective = prediction_prob > 0.5
+                
+                total_tested += 1
+                diagnostic_label = "Normal Pattern Detection"
+                
+                tag_id = uuid.uuid4().hex[:4].upper()
+                
+                if is_defective:
+                    faulty_count += 1
+                    part_tag = f"VLV-ERR-{tag_id}"
+                    
+                    if kmeans_model:
+                        cluster_id = kmeans_model.predict([mean_mfcc])[0]
+                        if cluster_id == 0:
+                            diagnostic_label = "Micro Crack Signature"
+                            rul = f"{random.randint(1, 4)} Hrs"
+                        elif cluster_id == 1:
+                            diagnostic_label = "Material Fatigue"
+                            rul = f"{random.randint(300, 500)} Hrs"
+                        else:
+                            diagnostic_label = "Pressure/Seal Leak"
+                            rul = f"{random.randint(48, 72)} Hrs"
+                    else:
+                        diagnostic_label = "Material Defect"
+                        rul = "72 Hrs"
+                        
+                    status_text = "Critical" if "Crack" in diagnostic_label or "Leak" in diagnostic_label else "Warning"
+                    rec_text = diagnostic_label
+                    health_val = random.randint(15, 35)
+                else:
+                    healthy_count += 1
+                    part_tag = f"VLV-OK-{tag_id}"
+                    rul = ">5000 Hrs"
+                    status_text = "Safe"
+                    rec_text = "Healthy"
+                    health_val = random.randint(85, 99)
+                    
+                # Increment specific diagnostic counter
+                if diagnostic_label in diagnostic_counts:
+                    diagnostic_counts[diagnostic_label] += 1
+                else:
+                    diagnostic_counts[diagnostic_label] = 1
+                    
+                karma = int((healthy_count / max(1, total_tested)) * 100)
+                
+                payload = {
+                    "karma_score": karma,
+                    "total_tested": total_tested,
+                    "healthy_count": healthy_count,
+                    "faulty_count": faulty_count,
+                    "diagnostic_counts": diagnostic_counts,
+                    "latest_spectrogram": img_url,
+                    "diagnostic_log": {
+                        "part_tag": part_tag,
+                        "rul": rul,
+                        "signal_source": "Live Valve Audio",
+                        "analysis_type": "KMeans Feature Clustering" if is_defective else "CNN Classification",
+                        "result": diagnostic_label,
+                        "status": status_text
+                    },
+                    "machines": [
+                        {
+                            "name": "Live Valve Stream",
+                            "health": health_val,
+                            "fail_prob": int(prediction_prob * 100),
+                            "rec": rec_text,
+                            "status": status_text
+                        }
+                    ]
                 }
-            ]
-        }
-        socketio.emit('factory_update', payload)
-        socketio.sleep(3) # Use socketio.sleep instead of time.sleep to prevent freezing!
+                socketio.emit('factory_update', payload)
+            except Exception as e:
+                print(f"Simulation error processing {random_file}: {e}")
+        else:
+            payload = {
+                "karma_score": 100,
+                "total_tested": total_tested,
+                "healthy_count": healthy_count,
+                "faulty_count": faulty_count,
+                "machines": []
+            }
+            socketio.emit('factory_update', payload)
+            
+        socketio.sleep(5) # Wait 5 seconds before testing the next file
 
 @socketio.on('connect')
 def handle_connect():
@@ -122,6 +205,17 @@ def process_audio(file_path):
     spectrogram = librosa.feature.melspectrogram(y=y_filtered, sr=sr)
     spectrogram_db = librosa.power_to_db(spectrogram, ref=np.max)
     
+    # Save spectrogram image
+    img_name = f"spec_{uuid.uuid4().hex}.png"
+    img_path = os.path.join('static', 'spectrograms', img_name)
+    plt.figure(figsize=(10, 4))
+    librosa.display.specshow(spectrogram_db, sr=sr, x_axis='time', y_axis='mel')
+    plt.colorbar(format='%+2.0f dB')
+    plt.title('Mel-frequency spectrogram')
+    plt.tight_layout()
+    plt.savefig(img_path)
+    plt.close()
+    
     current_time_steps = spectrogram_db.shape[1]
     if current_time_steps < TARGET_TIME_STEPS:
         pad_width = TARGET_TIME_STEPS - current_time_steps
@@ -130,7 +224,12 @@ def process_audio(file_path):
         spectrogram_db = spectrogram_db[:, :TARGET_TIME_STEPS]
         
     X = spectrogram_db.reshape(1, spectrogram_db.shape[0], spectrogram_db.shape[1], 1)
-    return X
+    
+    # Extract mean MFCC for diagnostic clustering
+    mfccs = librosa.feature.mfcc(y=y_filtered, sr=sr, n_mfcc=13)
+    mean_mfcc = np.mean(mfccs, axis=1)
+    
+    return X, f"/static/spectrograms/{img_name}", mean_mfcc
 
 # --- API Routes ---
 @app.route('/')
@@ -169,7 +268,7 @@ def predict():
         file.save(filepath)
         
         try:
-            X = process_audio(filepath)
+            X, img_url, _ = process_audio(filepath)
             prediction_prob = selected_model.predict(X)[0][0]
             is_defective = prediction_prob > 0.5
             status = 'Defective (Crack/Fatigue)' if is_defective else 'Healthy'
@@ -178,7 +277,8 @@ def predict():
                 'status': 'success',
                 'prediction': status,
                 'probability_defective': float(prediction_prob),
-                'probability_healthy': float(1.0 - prediction_prob)
+                'probability_healthy': float(1.0 - prediction_prob),
+                'spectrogram_url': img_url
             })
             
         except Exception as e:
